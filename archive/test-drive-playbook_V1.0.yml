@@ -1,0 +1,292 @@
+- name: configure VM-Series instance in front of a WP and DB Server
+  hosts: 127.0.0.1
+  connection: local
+
+  vars:
+    dns_server_primary: 8.8.8.8
+    dns_server_secondary: 8.8.4.4
+
+  tasks:
+  - name: wait for SSH (timeout 10min)
+    wait_for: port=22 host="{{PAVMAWSEIPMgmt}}" search_regex=SSH timeout=600
+  - name: set admin password
+    panos_admpwd: ip_address="{{PAVMAWSEIPMgmt}}" key_filename="{{key_filename}}" password="{{admin_password}}"
+    register: result
+    until: not result|failed
+    retries: 10
+    delay: 30
+  - name: waiting for commit to finish
+    panos_check: 
+      ip_address: "{{PAVMAWSEIPMgmt}}" 
+      password: "{{admin_password}}"
+    register: result
+    until: not result|failed
+    retries: 10
+    delay: 10
+  - name: delete admin SSH public key
+    panos_sshkey:
+      ip_address: "{{PAVMAWSEIPMgmt}}"
+      password: "{{admin_password}}"
+      admin_username: "admin"
+      state: "absent"
+  - name: set dns and panorama
+    panos_mgtconfig:
+      ip_address: "{{PAVMAWSEIPMgmt}}"
+      password: "{{admin_password}}"
+      dns_server_primary: "{{dns_server_primary}}"
+      dns_server_secondary: "{{dns_server_secondary}}"
+  - name: configure ethernet1/1
+    panos_dhcpif:
+      password: "{{admin_password}}"
+      ip_address: "{{PAVMAWSEIPMgmt}}"
+      if_name: "ethernet1/1"
+      zone_name: "external"
+      create_default_route: "yes"
+  - name: configure ethernet1/2
+    panos_dhcpif:
+      password: "{{admin_password}}"
+      ip_address: "{{PAVMAWSEIPMgmt}}"
+      if_name: "ethernet1/2"
+      zone_name: "web"
+      create_default_route: "no"
+  - name: configure ethernet1/3
+    panos_dhcpif:
+      password: "{{admin_password}}"
+      ip_address: "{{PAVMAWSEIPMgmt}}"
+      if_name: "ethernet1/3"
+      zone_name: "db"
+      create_default_route: "no"
+  - name: create aws monitor
+    panos_awsmonitor:
+      ip_address: "{{PAVMAWSEIPMgmt}}"
+      password: "{{admin_password}}"
+      monitor_name: "aws-monitor"
+      vpc_id: "{{VPCId}}"
+      access_key: "{{AWSMonitorUserAccessKey}}"
+      secret_access_key: "{{AWSMonitorUserSecretAccessKey}}"
+      source: "{{AWSMonitorSource}}"
+  - name: create SSH service
+    panos_service:
+      ip_address: "{{PAVMAWSEIPMgmt}}"
+      password: "{{admin_password}}"
+      service_name: "service-tcp-22"
+      protocol: "tcp"
+      port: "22"
+  - name: create SSH service on port 221
+    panos_service:
+      ip_address: "{{PAVMAWSEIPMgmt}}"
+      password: "{{admin_password}}"
+      service_name: "service-tcp-221"
+      protocol: "tcp"
+      port: "221"
+  - name: create SSH service on port 222
+    panos_service:
+      ip_address: "{{PAVMAWSEIPMgmt}}"
+      password: "{{admin_password}}"
+      service_name: "service-tcp-222"
+      protocol: "tcp"
+      port: "222"
+  - name: create security rule for server (SSH)
+    panos_srule:
+      ip_address: "{{PAVMAWSEIPMgmt}}"
+      password: "{{admin_password}}"
+      rule_name: "SSH inbound"
+      from_zone: ["external"]
+      to_zone: ["db", "web"]
+      source: ["any"]
+      source_user: ["any"]
+      destination: ["any"]
+      category: ["any"]
+      application: ["ssh", "ping"]
+      log_start: "true"
+      service: ["application-default"]
+      hip_profiles: ["any"]
+      action: "allow"
+  - name: create security rule for server (SSH221-222)
+    panos_srule:
+      ip_address: "{{PAVMAWSEIPMgmt}}"
+      password: "{{admin_password}}"
+      rule_name: "SSH 221-222 inbound"
+      from_zone: ["external"]
+      to_zone: ["db", "web"]
+      source: ["any"]
+      source_user: ["any"]
+      destination: ["any"]
+      category: ["any"]
+      application: ["ssh", "ping"]
+      log_start: "true"
+      service: ["service-tcp-221", "service-tcp-222"]
+      hip_profiles: ["any"]
+      action: "allow"
+  - name: create security rule for server (PING)
+    panos_srule:
+      ip_address: "{{PAVMAWSEIPMgmt}}"
+      password: "{{admin_password}}"
+      rule_name: "Allow all ping"
+      from_zone: ["any"]
+      to_zone: ["any"]
+      source: ["any"]
+      source_user: ["any"]
+      destination: ["any"]
+      category: ["any"]
+      application: ["ping"]
+      log_start: "true"
+      service: ["application-default"]
+      hip_profiles: ["any"]
+      action: "allow"
+  - name: create security rule for server (Web browsing)
+    panos_srule:
+      ip_address: "{{PAVMAWSEIPMgmt}}"
+      password: "{{admin_password}}"
+      rule_name: "Web browsing"
+      from_zone: ["external"]
+      to_zone: ["web"]
+      source: ["any"]
+      source_user: ["any"]
+      destination: ["any"]
+      category: ["any"]
+      application: ["web-browsing"]
+      log_start: "true"
+      service: ["application-default"]
+      hip_profiles: ["any"]
+      action: "allow"
+  - name: create security rule for server (Allow all outbound)
+    panos_srule:
+      ip_address: "{{PAVMAWSEIPMgmt}}"
+      password: "{{admin_password}}"
+      rule_name: "Allow all outbound"
+      from_zone: ["db", "web"]
+      to_zone: ["external"]
+      source: ["any"]
+      source_user: ["any"]
+      destination: ["any"]
+      category: ["any"]
+      application: ["any"]
+      log_start: "true"
+      service: ["application-default"]
+      hip_profiles: ["any"]
+      action: "allow"
+  - name: create security rule for server (Web to DB)
+    panos_srule:
+      ip_address: "{{PAVMAWSEIPMgmt}}"
+      password: "{{admin_password}}"
+      rule_name: "Web to DB"
+      from_zone: ["db", "web"]
+      to_zone: ["db", "web"]
+      source: ["any"]
+      source_user: ["any"]
+      destination: ["any"]
+      category: ["any"]
+      application: ["mysql"]
+      log_start: "true"
+      service: ["application-default"]
+      hip_profiles: ["any"]
+      action: "allow"
+  - name: create security rule for server (Deny all with logging)
+    panos_srule:
+      ip_address: "{{PAVMAWSEIPMgmt}}"
+      password: "{{admin_password}}"
+      rule_name: "Log default deny"
+      from_zone: ["any"]
+      to_zone: ["any"]
+      source: ["any"]
+      source_user: ["any"]
+      destination: ["any"]
+      category: ["any"]
+      application: ["any"]
+      log_start: "true"
+      service: ["any"]
+      hip_profiles: ["any"]
+      action: "deny"
+  - name: create nat SSH221 rule for 10.0.1.101
+    panos_nat:
+      ip_address: "{{PAVMAWSEIPMgmt}}"
+      password: "{{admin_password}}"
+      rule_name: "Web SSH"
+      from_zone: ["external"]
+      to_zone: "external"
+      source: ["any"]
+      destination: ["10.0.0.100"]
+      service: "service-tcp-221"
+      snat_type: "dynamic-ip-and-port"
+      snat_interface: "ethernet1/2"
+      dnat_address: "10.0.1.101"
+      dnat_port: "22"
+  - name: create nat SSH222 rule for 10.0.1.101
+    panos_nat:
+      ip_address: "{{PAVMAWSEIPMgmt}}"
+      password: "{{admin_password}}"
+      rule_name: "DB SSH"
+      from_zone: ["external"]
+      to_zone: "external"
+      source: ["any"]
+      destination: ["10.0.0.100"]
+      service: "service-tcp-222"
+      snat_type: "dynamic-ip-and-port"
+      snat_interface: "ethernet1/3"
+      dnat_address: "10.0.2.101"
+      dnat_port: "22"
+  - name: create nat HTTP to WordPress rule for 10.0.1.101
+    panos_nat:
+      ip_address: "{{PAVMAWSEIPMgmt}}"
+      password: "{{admin_password}}"
+      rule_name: "WordPress NAT"
+      from_zone: ["external"]
+      to_zone: "external"
+      source: ["any"]
+      destination: ["10.0.0.100"]
+      service: "service-http"
+      snat_type: "dynamic-ip-and-port"
+      snat_interface: "ethernet1/2"
+      dnat_address: "10.0.1.101"
+      dnat_port: "80"
+  - name: create source nat rule for server (Outbound NAT)
+    panos_snat:
+      ip_address: "{{PAVMAWSEIPMgmt}}"
+      password: "{{admin_password}}"
+      rule_name: "Outbound nat"
+      snat_type: "dynamic-ip-and-port"
+      interface_address_if: "ethernet1/1"
+      from_zone: ["db", "web"]
+      to_zone: "external"
+      source: "any"
+      destination: "any"
+      service: "any"
+  - name: reboot anyway
+    panos_restart:
+      ip_address: "{{PAVMAWSEIPMgmt}}" 
+      password: "{{admin_password}}"
+  - name: wait for reboot starting (1 minute)
+    pause: seconds=60
+  - name: waiting for reboot
+    panos_check: 
+      ip_address: "{{PAVMAWSEIPMgmt}}" 
+      password: "{{admin_password}}"
+    register: result
+    until: not result|failed
+    retries: 10
+    delay: 30
+  - name: upgrade content
+    panos_content: 
+      ip_address: "{{PAVMAWSEIPMgmt}}" 
+      password: "{{admin_password}}"
+      content_update: yes
+    ignore_errors: yes
+  - name: upgrade anti-virus
+    panos_content: 
+      ip_address: "{{PAVMAWSEIPMgmt}}" 
+      password: "{{admin_password}}"
+      anti_virus_update: yes
+    ignore_errors: yes
+  - name: upgrade pan-db
+    panos_content: 
+      ip_address: "{{PAVMAWSEIPMgmt}}" 
+      password: "{{admin_password}}"
+      url_download_region: europe
+    ignore_errors: yes
+  - name: upgrade wildfire
+    panos_content: 
+      ip_address: "{{PAVMAWSEIPMgmt}}"
+      password: "{{admin_password}}"
+      wildfire_update: yes
+    ignore_errors: yes
